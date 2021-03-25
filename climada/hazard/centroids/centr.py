@@ -1102,7 +1102,8 @@ class Centroids():
         memo[id(self)] = result
         for key, value in self.__dict__.items():
             if key == 'geometry':
-                setattr(result, key, gpd.GeoSeries(crs=self.geometry.crs))
+                setattr(result, key,
+                        gpd.GeoSeries(gpd.array.from_shapely([]), crs=self.geometry.crs))
             else:
                 setattr(result, key, copy.deepcopy(value, memo))
         return result
