@@ -159,6 +159,8 @@ class Hazard():
         ----------
         haz_type : str, optional
             acronym of the hazard type (e.g. 'TC').
+        pool : pathos.pool, optional
+            Pool that will be used for parallel computation when applicable. Default: None
 
         Examples
         --------
@@ -1070,6 +1072,8 @@ class Hazard():
         self.clear()
         hf_data = h5py.File(file_name, 'r')
         for (var_name, var_val) in self.__dict__.items():
+            if var_name != 'tag' and var_name not in hf_data.keys():
+                continue
             if var_name == 'centroids':
                 self.centroids.read_hdf5(hf_data.get(var_name))
             elif var_name == 'tag':
@@ -1396,35 +1400,48 @@ class Hazard():
         self.intensity = sparse.csr_matrix(dfr.values[:, 1:num_events + 1].transpose())
         self.fraction = sparse.csr_matrix(np.ones(self.intensity.shape, dtype=float))
 
-    def append(self, *haz_list):
+    def append(self, *others):
         """Append the events and centroids to this hazard object.
 
-        All of the given hazards must be of the same type as self.
-        The centroids of all hazards must have the same CRS.
+        All of the given hazards must be of the same type and use the same units as self. The
+        centroids of all hazards must have the same CRS.
 
-        The centroids of all hazards are combined together.
-        All raster centroids are converted to points and raster data
-        is discarded.
+        The following kinds of object attributes are processed:
 
-        Note: `self.centroids` is modified in place and centroid raster information (meta)
-        is destroyed.
+        - All centroids are combined together using `Centroids.union`.
+
+        - Lists, 1-dimensional arrays (NumPy) and sparse CSR matrices (SciPy) are concatenated.
+        Sparse matrices are concatenated along the first (vertical) axis.
+
+        - All `tag` attributes are appended to `self.tag`.
+
+        For any other type of attribute: A ValueError is raised if an attribute of that name is
+        not defined in all of the non-empty hazards at least. However, there is no check that the
+        attribute value is identical among the given hazard objects. The initial attribute value of
+        `self` will not be modified.
+
+        Note: Each of the hazard's `centroids` attributes might be modified in place in the sense
+        that missing properties are added, but existing ones are not overwritten. In case of raster
+        centroids, conversion to point centroids is applied so that raster information (meta) is
+        lost. For more information, see `Centroids.union`.
 
         Parameters
         ----------
-        haz_list : one or more climada.hazard.Hazard objects
+        others : one or more climada.hazard.Hazard objects
             Hazard instances to append to self
 
         Raises
         ------
-        TypeError
+        TypeError, ValueError
 
         See Also
         --------
-        Hazard.concat: concatenate 2 or more hazards
+        Hazard.concat : concatenate 2 or more hazards
+        Centroids.union : combine centroids
         """
-        if len(haz_list) == 0:
+        if len(others) == 0:
             return
-        haz_list = (self,) + haz_list
+        haz_list = [self] + list(others)
         haz_list_nonempty = [haz for haz in haz_list if haz.size > 0]
 
         for haz in haz_list:
@@ -1444,7 +1461,7 @@ class Hazard():
 
         units = {haz.units for haz in haz_list if haz.units != ''}
         if len(units) > 1:
-            raise ValueError(f"The hazards use different units: {units}. "
+            raise ValueError(f"The given hazards use different units: {units}. "
                              "The hazards are incompatible and cannot be concatenated.")
         elif len(units) == 0:
             units = {''}
@@ -1489,39 +1506,49 @@ class Hazard():
         self.sanitize_event_ids()
 
 
-    @staticmethod
-    def concat(haz_list):
+    @classmethod
+    def concat(cls, haz_list):
         """
         Concatenate events of several hazards of same type.
 
-        Centroids of all hazards must either all be rasters with the same
-        resolution, or all be points.
+        This function creates a new hazard of the same class as the first hazard in the given list
+        and then applies the `append` method. Please refer to the docs of `Hazard.append` for
+        caveats and limitations of the concatenation procedure.
 
-        The centroids of all hazards are combined together.
-        All raster centroids are converted to points and raster data
-        is discarded.
+        For centroids, tags, lists, arrays and sparse matrices, the remarks in `Hazard.append`
+        apply. All other attributes are copied from the first object in `haz_list`.
+
+        Note that `Hazard.concat` can be used to concatenate hazards of a subclass. The result's
+        type will be the subclass. However, calling `concat([])` (with an empty list) is equivalent
+        to instantiation without init parameters. So, `Hazard.concat([])` is equivalent to
+        `Hazard()`. If `HazardB` is a subclass of `Hazard`, then `HazardB.concat([])` is equivalent
+        to `HazardB()` (unless `HazardB` overrides the `concat` method).
 
         Parameters
         ----------
-        haz_list: list of climada.hazard.Hazard objects
+        haz_list : list of climada.hazard.Hazard objects
             Hazard instances of the same hazard type (subclass).
 
         Returns
         -------
-        haz_concat: instance of climada.hazard.Hazard
+        haz_concat : instance of climada.hazard.Hazard
             This will be of the same type (subclass) as all the hazards in `haz_list`.
-
-        Raises
-        ------
-        ValueError
 
         See Also
         --------
-        hazard.centroids.Centroids.union: combine centroids
+        Hazard.append : append hazards to a hazard in place
+        Centroids.union : combine centroids
         """
+        if len(haz_list) == 0:
+            return cls()
         haz_concat = haz_list[0].__class__()
         haz_concat.tag.haz_type = haz_list[0].tag.haz_type
-        haz_concat.units = haz_list[0].units
+        for attr_name, attr_val in vars(haz_list[0]).items():
+            # to save memory, only copy simple attributes like
+            # "units" that are not explicitly handled by Hazard.append
+            if not (isinstance(attr_val, (list, np.ndarray, sparse.csr.csr_matrix))
+                    or attr_name in ["tag", "centroids"]):
+                setattr(haz_concat, attr_name, copy.deepcopy(attr_val))
         haz_concat.append(*haz_list)
         return haz_concat
 
